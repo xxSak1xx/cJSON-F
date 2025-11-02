@@ -149,7 +149,7 @@ MSVC：恢复警告设置，GCC：恢复符号可见性。这样库的内部配�
 #define NAN 0.0/0.0
 #endif
 ```
-前一段用于判断浮点数是否为NaN（Not
+前一段用于判断浮点数是否为`NaN`（Not
  a Number）或无穷。[^3]
  
  [^3]:在 IEEE 754 浮点标准中，NaN 与自身不相等。所以 d != d 如果为真，说明 d 是 NaN; 而d为无穷大时，d - d = NaN
@@ -162,7 +162,8 @@ MSVC：恢复警告设置，GCC：恢复符号可见性。这样库的内部配�
     void *(CJSON_CDECL *reallocate)(void *pointer, size_t size);
 } internal_hooks;
  ```
- 内部钩子函数集合，用于注册用户自定义的内存管理函数。
+ 内部`hook`函数集合，用于注册用户自定义的内存管理函数。
+ **`realloc`函数并没有暴露给用户，只有在`free`和`malloc`函数均为标准库中的情况下才启用。这是防止自定义与系统内存管理函数混用导致不能正确识别并重新分配内存。**
  
  ```C
  static unsigned char get_decimal_point(void)
@@ -179,5 +180,90 @@ MSVC：恢复警告设置，GCC：恢复符号可见性。这样库的内部配�
 
 [^4]:德、法、意、俄等地区，其小数点表示为","
 
-如果ENABLE_LOCALES启用的话，就从lconv (local conventions)中调用当地约定的小数点，否则就采用JSON标准中规定的"."为小数点。
+如果`ENABLE_LOCALES`启用的话，就从`lconv` (local conventions)中调用当地约定的小数点，否则就采用JSON标准中规定的"."为小数点。
+
+```C
+typedef struct
+{
+    const unsigned char *content;
+    size_t length;
+    size_t offset;
+    size_t depth; /* How deeply nested (in arrays/objects) is the input at the current offset. */
+    internal_hooks hooks;
+} parse_buffer;
+/* check if the given size is left to read in a given parse buffer (starting with 1) */
+#define can_read(buffer, size) ((buffer != NULL) && (((buffer)->offset + size) <= (buffer)->length))
+/* check if the buffer can be accessed at the given index (starting with 0) */
+#define can_access_at_index(buffer, index) ((buffer != NULL) && (((buffer)->offset + index) < (buffer)->length))
+#define cannot_access_at_index(buffer, index) (!can_access_at_index(buffer, index))
+/* get a pointer to the buffer at the position */
+#define buffer_at_offset(buffer) ((buffer)->content + (buffer)->offset)
+```
+这种缓冲区的设计十分精妙且常见。使用全局变量保存算法数据不仅杂乱，还会在多个文件共用一个库的时候产生竞争，因此就要设计`buffer`来统一管理解析。下面是与该`buffer`相关的一些辅助宏。
+
+```C
+goto fail;
+···
+fail:
+···
+```
+
+此库中多处用到这种写法，但跳转层数少、逻辑清晰、程序出口统一，是可以接受的处理。
+
+```C
+#if defined(__clang__) || (defined(__GNUC__)  && ((__GNUC__ > 4) || ((__GNUC__ == 4) && (__GNUC_MINOR__ > 5))))
+    #pragma GCC diagnostic push
+#endif
+#ifdef __GNUC__
+#pragma GCC diagnostic ignored "-Wcast-qual"
+#endif
+/* helper function to cast away const */
+static void* cast_away_const(const void* string)
+{
+    return (void*)string;
+}
+#if defined(__clang__) || (defined(__GNUC__)  && ((__GNUC__ > 4) || ((__GNUC__ == 4) && (__GNUC_MINOR__ > 5))))
+    #pragma GCC diagnostic pop
+#endif
+```
+
+这段代码用于临时忽略编译器`const` 警告，用于衔接旧库函数或API与现代C风格。
+
+```C
+static void skip_oneline_comment(char **input)
+{
+    *input += static_strlen("//");
+
+    for (; (*input)[0] != '\0'; ++(*input))
+    {
+        if ((*input)[0] == '\n') {
+            *input += static_strlen("\n");
+            return;
+        }
+    }
+}
+
+static void skip_multiline_comment(char **input)
+{
+    *input += static_strlen("/*");
+
+    for (; (*input)[0] != '\0'; ++(*input))
+    {
+        if (((*input)[0] == '*') && ((*input)[1] == '/'))
+        {
+            *input += static_strlen("*/");
+            return;
+        }
+    }
+}
+```
+
+此处比较人性化地添加了注释选项，尽管json的官方标准并不支持注释。
+
+`inline`和`restrict`关键字：
+`inline`修饰的函数通常是短小、常用到的。这一关键字会**建议**编译器将函数在调用时直接展开，而不是生成真正的函数调用指令。这可以消除函数调用的栈开销，加快执行速度。
+`restrict`则是对指针的限定，用于通知编译器该指针访问的对象不会被其他指针访问或修改，使之可以激进优化内存读写和寄存器缓存。
+**对RISC-V而言，可以使内存访问次数明显降低，五级流水线高速运转。**
+
+> 此处，我深深地感受到**计算机组成**理论与实践的联系，尤其涉及到刚刚学习到的流水线相关的知识。现在，我可以从更底层的角度去理解C乃至其他语言，甚至能从底层的视角去看待高层的应用。我为此感到由衷的高兴。
 
